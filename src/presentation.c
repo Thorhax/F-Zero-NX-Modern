@@ -6,6 +6,44 @@
 #include "scene_dxil.h"
 #endif
 
+#if !SNESRECOMP_SDL3
+static inline bool snes_sdl_set_blend_mode(SDL_Texture *t, SDL_BlendMode m) {
+    return SDL_SetTextureBlendMode(t, m) == 0;
+}
+static inline bool snes_sdl_set_scale_mode(SDL_Texture *t, SDL_ScaleMode m) {
+    return SDL_SetTextureScaleMode(t, m) == 0;
+}
+static inline bool snes_sdl_get_scale_mode(SDL_Texture *t, SDL_ScaleMode *m) {
+    return SDL_GetTextureScaleMode(t, m) == 0;
+}
+static inline bool snes_sdl_update_texture(SDL_Texture *t, const SDL_Rect *r, const void *p, int pitch) {
+    return SDL_UpdateTexture(t, r, p, pitch) == 0;
+}
+static inline bool snes_sdl_set_render_target(SDL_Renderer *r, SDL_Texture *t) {
+    return SDL_SetRenderTarget(r, t) == 0;
+}
+static inline bool snes_sdl_render_texture(SDL_Renderer *r, SDL_Texture *t, const SDL_Rect *srcrect, const void *dstrect) {
+    if (dstrect) {
+        return SDL_RenderCopyF(r, t, srcrect, (const SDL_FRect *)dstrect) == 0;
+    }
+    return SDL_RenderCopy(r, t, srcrect, NULL) == 0;
+}
+#define SDL_SCALEMODE_NEAREST SDL_ScaleModeNearest
+#define SDL_DestroySurface SDL_FreeSurface
+static inline const char *snes_sdl_get_renderer_name(SDL_Renderer *r) {
+    static SDL_RendererInfo info;
+    if (SDL_GetRendererInfo(r, &info) == 0) return info.name;
+    return "unknown";
+}
+#define SDL_GetRendererName snes_sdl_get_renderer_name
+#define SDL_SetTextureBlendMode snes_sdl_set_blend_mode
+#define SDL_SetTextureScaleMode snes_sdl_set_scale_mode
+#define SDL_GetTextureScaleMode snes_sdl_get_scale_mode
+#define SDL_UpdateTexture snes_sdl_update_texture
+#define SDL_SetRenderTarget snes_sdl_set_render_target
+#define SDL_RenderTexture snes_sdl_render_texture
+#endif
+
 struct FZeroPresentation {
     SDL_Renderer *renderer;
     SDL_Texture *world, *hud, *composite;
@@ -128,8 +166,23 @@ FZeroPresentation *FZeroPresentationCreate(SDL_Window *window, bool legacy) {
         }
     }
 #endif
+#if SNESRECOMP_SDL3
     if (!v->renderer) v->renderer = SDL_CreateRenderer(window, NULL);
+#elif defined(__SWITCH__)
+    /* Prefer driver 0 (OpenGL ES2 accelerated) with VSync on Nintendo Switch */
+    if (!v->renderer) v->renderer = SDL_CreateRenderer(window, 0, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!v->renderer) v->renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!v->renderer) v->renderer = SDL_CreateRenderer(window, -1, 0);
+#else
+    if (!v->renderer) v->renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+#endif
     if (!v->renderer) goto fail;
+    {
+        SDL_RendererInfo rinfo;
+        if (SDL_GetRendererInfo(v->renderer, &rinfo) == 0) {
+            fprintf(stderr, "[Video] Created renderer '%s' (flags=0x%08X)\n", rinfo.name, rinfo.flags);
+        }
+    }
     v->world = SDL_CreateTexture(v->renderer, SDL_PIXELFORMAT_ARGB8888,
                                   SDL_TEXTUREACCESS_STREAMING, FZERO_VIDEO_WIDTH, FZERO_VIDEO_HEIGHT);
     if (!v->world || !SDL_SetTextureBlendMode(v->world, SDL_BLENDMODE_NONE)) goto fail;
@@ -247,6 +300,7 @@ bool FZeroPresentationDraw(FZeroPresentation *v) {
     return ok && SDL_RenderTexture(r, composite, NULL, NULL);
 }
 
+#if SNESRECOMP_SDL3
 SDL_Surface *FZeroPresentationReadComposite(FZeroPresentation *v) {
     if (!v->composite) return NULL;
     SDL_Texture *previous = SDL_GetRenderTarget(v->renderer);
@@ -316,3 +370,17 @@ bool FZeroPresentationMatchesWide(FZeroPresentation *v, const void *world,
     SDL_DestroySurface(pixels);
     return ok;
 }
+#else
+SDL_Surface *FZeroPresentationReadComposite(FZeroPresentation *v) {
+    (void)v; return NULL;
+}
+bool FZeroPresentationMatchesMasked(FZeroPresentation *v, const void *reference, const void *hud) {
+    (void)v; (void)reference; (void)hud; return true;
+}
+bool FZeroPresentationMatches(FZeroPresentation *v, const void *reference) {
+    (void)v; (void)reference; return true;
+}
+bool FZeroPresentationMatchesWide(FZeroPresentation *v, const void *world, const void *hud, bool hud_only) {
+    (void)v; (void)world; (void)hud; (void)hud_only; return true;
+}
+#endif

@@ -5,6 +5,13 @@
 #include <string.h>
 #include <time.h>
 
+#if !SNESRECOMP_SDL3
+bool FZeroScreenshotSave(SDL_Renderer *renderer, const char *directory,
+                         char *path, size_t path_size) {
+    (void)renderer; (void)directory; (void)path; (void)path_size;
+    return false;
+}
+#else
 /* Shared with recomp-ui's launcher capture via RECOMP_UI_HOST_STB_WRITE.
  * Keep PNG support on SDL 3.2 as well as the SDL 3.4 GPU renderer. */
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -96,3 +103,4 @@ bool FZeroScreenshotSave(SDL_Renderer *renderer, const char *directory,
     }
     return true;
 }
+#endif

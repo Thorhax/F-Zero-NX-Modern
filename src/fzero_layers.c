@@ -11,24 +11,92 @@ static bool RangeOnLine(const Ppu *ppu, int y, int first, int count) {
 
 static void CaptureSprites(FZeroLayers *layers, const Ppu *ppu, int line,
                            int first, int count, bool *mask) {
+    (void)layers;
     int y = line - 1;
     if (!(ppu->screenEnabled[0] & 0x10) || !RangeOnLine(ppu, y, first, count)) return;
-    Ppu *copy = &layers->scratch;
-    memcpy(copy, ppu, sizeof(*copy));
-    copy->renderBuffer = (uint8_t *)layers->capture;
-    copy->renderPitch = sizeof(layers->capture[0]);
-    PpuClearOverlayBindings(copy);
-    PpuBindOverlaySurface(copy, kPpuOverlaySource_Obj,
-                          (uint8_t *)layers->capture, sizeof(layers->capture[0]));
-    PpuSetOverlayCapture(copy, kPpuOverlaySource_Obj, 0, y, 256, 1, 0);
-    PpuSetOverlayOamRange(copy, first, count);
-    ppu_runLine(copy, line);
+
+    static const uint8_t spriteSizes[8][2] = {
+        {8, 16}, {8, 32}, {8, 64}, {16, 32},
+        {16, 64}, {32, 64}, {16, 32}, {16, 32}
+    };
+
+    uint8_t start_index = PPU_objPriority(ppu) ? (ppu->oamaddl & 0xfe) : 0;
+    int spritesFound = 0;
+    int tilesFound = 0;
+    uint8_t foundSprites[128];
+    uint8_t index = start_index;
+
+    for (int i = 0; i < 128; i++) {
+        uint8_t sprite_y = ppu->oam[index] >> 8;
+        uint8_t row = y - sprite_y;
+        int spriteSize = spriteSizes[PPU_objSize(ppu)][(ppu->highOam[index >> 3] >> ((index & 7) + 1)) & 1];
+        int spriteHeight = PPU_objInterlace(ppu) ? spriteSize / 2 : spriteSize;
+        if (row < spriteHeight) {
+            int x = ppu->oam[index] & 0xff;
+            x |= ((ppu->highOam[index >> 3] >> (index & 7)) & 1) << 8;
+            if (x >= 256) x -= 512;
+            if (x + spriteSize > 0) {
+                spritesFound++;
+                if (spritesFound > 32 && !(ppu->renderFlags & kPpuRenderFlags_NoSpriteLimits)) {
+                    spritesFound = 32;
+                    break;
+                }
+                foundSprites[spritesFound - 1] = index;
+            }
+        }
+        index += 2;
+    }
+
+    PpuZbufType overlay[256] = {0};
+
+    for (int i = spritesFound; i > 0; i--) {
+        index = foundSprites[i - 1];
+        int slot = index >> 1;
+        uint8_t row = y - (ppu->oam[index] >> 8);
+        int spriteSize = spriteSizes[PPU_objSize(ppu)][(ppu->highOam[index >> 3] >> ((index & 7) + 1)) & 1];
+        int x = ppu->oam[index] & 0xff;
+        x |= ((ppu->highOam[index >> 3] >> (index & 7)) & 1) << 8;
+        if (x >= 256) x -= 512;
+
+        if (PPU_objInterlace(ppu)) row = row * 2 + (ppu->evenFrame ? 0 : 1);
+        int oam1 = ppu->oam[index + 1];
+        int objAdr = (oam1 & 0x100) ? PPU_objTileAdr2(ppu) : PPU_objTileAdr1(ppu);
+        if (oam1 & 0x8000) row = spriteSize - 1 - row;
+        int paletteBase = 0x80 + 16 * ((oam1 & 0xe00) >> 9);
+        int prio = SPRITE_PRIO_TO_PRIO((oam1 & 0x3000) >> 12, (oam1 & 0x800) == 0);
+        PpuZbufType z = paletteBase + (prio << 8);
+
+        bool in_range = (slot >= first && slot < first + count);
+
+        for (int col = 0; col < spriteSize; col += 8) {
+            if (col + x <= -8 || col + x >= 256) continue;
+            tilesFound++;
+            if (tilesFound > 34 && !(ppu->renderFlags & kPpuRenderFlags_NoSpriteLimits)) break;
+            int usedCol = (oam1 & 0x4000) ? (spriteSize - 1 - col) : col;
+            int usedTile = ((((oam1 & 0xff) >> 4) + (row >> 3)) << 4) | (((oam1 & 0xf) + (usedCol >> 3)) & 0xf);
+            const uint16_t *addr = &PpuRenderVram(ppu)[(objAdr + usedTile * 16 + (row & 7)) & 0x7fff];
+            uint32_t plane = addr[0] | ((uint32_t)addr[8] << 16);
+            int px_left = col + x < 0 ? -(col + x) : 0;
+            int px_right = (col + x + 8 > 256) ? (256 - (col + x)) : 8;
+
+            for (int px = px_left; px < px_right; px++) {
+                int shift = (oam1 & 0x4000) ? px : (7 - px);
+                uint32_t bits = plane >> shift;
+                int pixel = ((bits >> 0) & 1) | ((bits >> 7) & 2) |
+                            ((bits >> 14) & 4) | ((bits >> 21) & 8);
+                if (pixel == 0) continue;
+                int screen_x = col + x + px;
+                if (in_range) {
+                    overlay[screen_x] = z + pixel;
+                }
+            }
+        }
+        if (tilesFound > 34 && !(ppu->renderFlags & kPpuRenderFlags_NoSpriteLimits)) break;
+    }
+
     for (int x = 0; x < FZERO_LAYER_WIDTH; ++x) {
         int index = x + kPpuExtraLeftRight;
-        PpuZbufType selected = copy->overlayBuffers[kPpuOverlaySource_Obj].data[index];
-        /* Use capture for coverage only. Preserve final original RGB, including
-         * colour math, windows and master brightness. A hidden sprite cannot
-         * promote a different foreground layer into the HUD. */
+        PpuZbufType selected = overlay[x];
         if ((selected & 0xff) && selected == ppu->bgBuffers[0].data[index])
             mask[x] = true;
     }
@@ -133,6 +201,15 @@ static bool TextOverlayPixel(const Ppu *ppu, int x, bool native_oam) {
 /* Side backgrounds and vehicles are rendered on a copy. The authentic centre
  * and live sprite evaluation retain their original width and hardware limits.
  * Capture also runs with widescreen off so a paused menu can switch immediately. */
+static inline void CopyPpuExceptMode2(Ppu *dst, const Ppu *src) {
+    memcpy(dst, src, offsetof(Ppu, wsMode2Capture));
+    const uint8_t *src_bytes = (const uint8_t *)src;
+    uint8_t *dst_bytes = (uint8_t *)dst;
+    size_t start = offsetof(Ppu, wsLayerClamp);
+    size_t end = offsetof(Ppu, vram);
+    memcpy(dst_bytes + start, src_bytes + start, end - start);
+}
+
 static void BuildWideLine(FZeroLayers *layers, const Ppu *ppu, int line,
                           bool supported, bool hud_layout) {
     int y = line - 1;
@@ -141,7 +218,8 @@ static void BuildWideLine(FZeroLayers *layers, const Ppu *ppu, int line,
     for (int x = 0; x < FZERO_WIDE_WIDTH; ++x) hud[x] = 0xff000000;
     if (supported) {
         Ppu *copy = &layers->scratch;
-        memcpy(copy, ppu, sizeof(*copy));
+        CopyPpuExceptMode2(copy, ppu);
+        memcpy(copy->vram, ppu->vram, sizeof(copy->vram));
         copy->renderBuffer = (uint8_t *)layers->wide_capture;
         copy->renderPitch = sizeof(layers->wide_capture[0]);
         PpuClearOverlayBindings(copy);
@@ -242,10 +320,11 @@ static void MoveWideHud(FZeroLayers *layers, const Ppu *ppu, int line, bool prot
     }
     if(!any) return;
 
+    Ppu *copy=&layers->scratch;
     /* Re-render the live scene beneath the old HUD. No shifted screenshot or
      * neighbouring pixel can recover a car or track detail hidden by it. */
-    Ppu *copy=&layers->scratch;
-    memcpy(copy,ppu,sizeof(*copy));
+    CopyPpuExceptMode2(copy, ppu);
+    copy->renderVram = (uint16_t *)PpuRenderVram(ppu);
     copy->renderBuffer=(uint8_t*)layers->capture;
     copy->renderPitch=sizeof(layers->capture[0]);
     PpuClearOverlayBindings(copy);

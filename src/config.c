@@ -13,6 +13,21 @@
 #include <windows.h>
 #endif
 
+#if !SNESRECOMP_SDL3
+#ifndef SDLK_F
+#define SDLK_F SDLK_f
+#endif
+#ifndef SDL_KMOD_CTRL
+#define SDL_KMOD_CTRL KMOD_CTRL
+#endif
+#ifndef SDL_KMOD_ALT
+#define SDL_KMOD_ALT KMOD_ALT
+#endif
+#ifndef SDL_KMOD_SHIFT
+#define SDL_KMOD_SHIFT KMOD_SHIFT
+#endif
+#endif
+
 static int FZeroStrEqNoCase(const char *a, const char *b) {
     return SDL_strcasecmp(a, b) == 0;
 }

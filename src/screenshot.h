@@ -1,6 +1,6 @@
 #pragma once
 
-#include <SDL3/SDL.h>
+#include "desktop/sdl_compat.h"
 
 /* Save the window's completed game image, after scaling and before UI, as RGB
  * PNG at the renderer's output resolution, including letterboxing. Call after

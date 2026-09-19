@@ -1,5 +1,5 @@
 #pragma once
-#include <SDL3/SDL.h>
+#include "desktop/sdl_compat.h"
 #include "display_layout.h"
 
 enum { FZERO_VIDEO_WIDTH = FZERO_NATIVE_WIDTH, FZERO_VIDEO_HEIGHT = FZERO_DISPLAY_HEIGHT };

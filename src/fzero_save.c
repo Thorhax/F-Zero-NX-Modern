@@ -1,9 +1,41 @@
 #include "fzero_save.h"
 #include "fzero_records.h"
-#include <SDL3/SDL.h>
+#include "desktop/sdl_compat.h"
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+
+#if !SNESRECOMP_SDL3
+static inline bool SDL_CreateDirectory(const char *d) {
+#ifdef _WIN32
+    return _mkdir(d) == 0 || errno == EEXIST;
+#else
+    return mkdir(d, 0777) == 0 || errno == EEXIST;
+#endif
+}
+static inline bool SDL_RemovePath(const char *p) {
+    return remove(p) == 0;
+}
+static inline bool SDL_RenamePath(const char *oldp, const char *newp) {
+    return rename(oldp, newp) == 0;
+}
+static inline bool SDL_CopyFile(const char *src, const char *dst) {
+    size_t size = 0;
+    void *data = SDL_LoadFile(src, &size);
+    if (!data) return false;
+    FILE *f = fopen(dst, "wb");
+    if (!f) { SDL_free(data); return false; }
+    size_t written = fwrite(data, 1, size, f);
+    fclose(f);
+    SDL_free(data);
+    return written == size;
+}
+#define SDL_IOStream SDL_RWops
+#define SDL_IOFromFile SDL_RWFromFile
+#define SDL_WriteIO(ctx, ptr, size) SDL_RWwrite((ctx), (ptr), 1, (size))
+#define SDL_FlushIO(ctx) (true)
+#define SDL_CloseIO(ctx) (SDL_RWclose(ctx) == 0)
+#endif
 
 static const char *path="saves/save.srm";
 static const char *temporary="saves/save.srm.writing";

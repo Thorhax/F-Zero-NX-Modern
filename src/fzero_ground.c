@@ -96,6 +96,8 @@ bool FZeroGroundRenderLine(FZeroGround *ground, Ppu *copy, int line) {
     uint32_t *output = (uint32_t *)(copy->renderBuffer + (line - 1) * copy->renderPitch);
     int first = 0;
     BeginPass(ground);
+    uint16_t orig_vram[count];
+    for (int i = 0; i < count; ++i) orig_vram[i] = copy->vram[addresses[i]];
     for (int i = 0; i <= count; ++i) {
         /* Two course positions can alias the same cache cell on one line.
          * Finish the current span before assigning that cell a different tile.
@@ -116,8 +118,10 @@ bool FZeroGroundRenderLine(FZeroGround *ground, Ppu *copy, int line) {
         /* High bytes hold the current animated tile artwork. */
         copy->vram[address] = (copy->vram[address] & 0xff00) | tiles[i];
     }
-    for (int i = 0; i < count; ++i)
+    for (int i = 0; i < count; ++i) {
         output[i < FZERO_WIDE_MARGIN ? i : i + 256] = pixels[i];
+        copy->vram[addresses[i]] = orig_vram[i];
+    }
     ++ground->lines;
     ground->corrected_pixels += corrected;
     return true;

@@ -38,6 +38,11 @@
 #ifdef FZERO_MACOS_APP
 #include <unistd.h>
 #endif
+#ifdef __SWITCH__
+#include <switch.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "snes/snes.h"
 #include "snes/ppu.h"
@@ -72,7 +77,27 @@
 
 static FZeroRuntimeUi *g_runtime_ui;
 static FZeroImGui *g_runtime_imgui;
+#else
+typedef struct FZeroRuntimeUi FZeroRuntimeUi;
+typedef struct FZeroImGui FZeroImGui;
+static FZeroRuntimeUi *g_runtime_ui = NULL;
+static FZeroImGui *g_runtime_imgui = NULL;
+static inline bool FZeroRuntimeUiIsOpen(FZeroRuntimeUi *ui) { (void)ui; return false; }
+static inline void FZeroRuntimeUiResetPad(FZeroRuntimeUi *ui) { (void)ui; }
+static inline int FZeroRuntimeUiHandleEvent(FZeroRuntimeUi *ui, const SDL_Event *ev) { (void)ui; (void)ev; return 0; }
+static inline int FZeroRuntimeUiTakeScreenshotRequest(FZeroRuntimeUi *ui) { (void)ui; return 0; }
+static inline void fzero_imgui_process_event(FZeroImGui *gui, const SDL_Event *ev) { (void)gui; (void)ev; }
 #endif
+
+static inline uint64_t fzero_get_ticks_ns(void) {
+#if SNESRECOMP_SDL3
+  return SDL_GetTicksNS();
+#else
+  static uint64_t freq = 0;
+  if (!freq) freq = SDL_GetPerformanceFrequency();
+  return (SDL_GetPerformanceCounter() * 1000000000ULL) / freq;
+#endif
+}
 
 #include "fzero_spc_player.h"
 
@@ -125,8 +150,22 @@ int g_ws_extra;
 
 /* ── audio ─────────────────────────────────────────────────────────────── */
 
-static SDL_Mutex *g_audio_mutex;
+#if SNESRECOMP_SDL3
+typedef SDL_Mutex SDL_mutex_t;
+#else
+typedef SDL_mutex SDL_mutex_t;
+#endif
+static SDL_mutex_t *g_audio_mutex;
+static void FillAudioBuffer(Uint8 *stream, int len);
+#if SNESRECOMP_SDL3
 static SDL_AudioStream *g_audio_stream;
+#else
+static SDL_AudioDeviceID g_audio_device;
+static void SDLCALL AudioCallback(void *userdata, Uint8 *stream, int len) {
+  (void)userdata;
+  FillAudioBuffer(stream, len);
+}
+#endif
 static uint8_t *g_audiobuffer;
 static uint8_t *g_audiobuffer_cur;
 static uint8_t *g_audiobuffer_end;
@@ -163,6 +202,7 @@ static void FillAudioBuffer(Uint8 *stream, int len) {
   SDL_UnlockMutex(g_audio_mutex);
 }
 
+#if SNESRECOMP_SDL3
 static void SDLCALL AudioStreamCallback(void *userdata, SDL_AudioStream *stream,
                                         int additional_amount,
                                         int total_amount) {
@@ -179,6 +219,7 @@ static void SDLCALL AudioStreamCallback(void *userdata, SDL_AudioStream *stream,
   FillAudioBuffer(g_audio_stream_buffer, additional_amount);
   SDL_PutAudioStreamData(stream, g_audio_stream_buffer, additional_amount);
 }
+#endif
 
 /* `freq` comes from the launcher settings (default 48000). */
 static int InitAudio(int freq) {
@@ -189,8 +230,9 @@ static int InitAudio(int freq) {
   }
   SDL_AudioSpec want = {0}, have;
   want.freq = freq;
-  want.format = SDL_AUDIO_S16;
+  want.format = AUDIO_S16;
   want.channels = 2;
+#if SNESRECOMP_SDL3
   have = want;
   g_audio_stream = SDL_OpenAudioDeviceStream(
       SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &want, AudioStreamCallback, NULL);
@@ -199,6 +241,20 @@ static int InitAudio(int freq) {
     return 0;
   }
   SDL_GetAudioStreamFormat(g_audio_stream, &have, NULL);
+#else
+#ifdef __SWITCH__
+  want.samples = 2048;
+#else
+  want.samples = 1024;
+#endif
+  want.callback = AudioCallback;
+  g_audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+  if (g_audio_device == 0) {
+    fprintf(stderr, "Failed to open audio device: %s\n", SDL_GetError());
+    return 0;
+  }
+  have = want;
+#endif
   g_audio_channels = 2;
   /* Native DSP block is 534 samples at 32040 Hz. Round onto the opened rate
    * (32040->534 1:1, 48000->800, 44100->735). */
@@ -208,8 +264,13 @@ static int InitAudio(int freq) {
       (uint8_t *)calloc(g_frames_per_block * g_audio_channels * sizeof(int16),
                         1);
   if (!g_audiobuffer) {
+#if SNESRECOMP_SDL3
     SDL_DestroyAudioStream(g_audio_stream);
     g_audio_stream = NULL;
+#else
+    SDL_CloseAudioDevice(g_audio_device);
+    g_audio_device = 0;
+#endif
     return 0;
   }
   g_audiobuffer_cur = g_audiobuffer_end = g_audiobuffer;
@@ -219,15 +280,29 @@ static int InitAudio(int freq) {
 /* ── input ─────────────────────────────────────────────────────────────── */
 
 static uint32_t g_key_bind[SDL_NUM_SCANCODES];
+#if SNESRECOMP_SDL3
 static SDL_Gamepad *g_gamepad;
+#else
+static SDL_GameController *g_gamepad;
+#endif
 
 static void OpenConnectedGamepad(void) {
   if (g_gamepad) return;
+#if SNESRECOMP_SDL3
   int count = 0;
   SDL_JoystickID *pads = SDL_GetGamepads(&count);
   for (int i = 0; i < count && !g_gamepad; ++i)
     g_gamepad = SDL_OpenGamepad(pads[i]);
   SDL_free(pads);
+#else
+  int count = SDL_NumJoysticks();
+  for (int i = 0; i < count && !g_gamepad; ++i) {
+    if (SDL_IsGameController(i)) {
+      g_gamepad = SDL_GameControllerOpen(i);
+      if (g_gamepad) break;
+    }
+  }
+#endif
 }
 
 static uint32 GamepadButtonBit(int button) {
@@ -254,16 +329,34 @@ static uint32 ReadInput(const FZeroSettings *settings) {
   uint32 input = 0;
   if (settings->player_src[0] == 1) {
     int count = 0;
+#if SNESRECOMP_SDL3
     const bool *keys = SDL_GetKeyboardState(&count);
+#else
+    const Uint8 *keys = SDL_GetKeyboardState(&count);
+#endif
     for (int i = 0; i < count && i < SDL_NUM_SCANCODES; ++i)
       if (keys[i]) input |= g_key_bind[i];
   } else if (settings->player_src[0] == 2 && g_gamepad) {
+#if SNESRECOMP_SDL3
     for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
       if (SDL_GetGamepadButton(g_gamepad, (SDL_GamepadButton)b))
         input |= GamepadButtonBit(b);
     int dz = settings->deadzone[0] * 32768 / 100;
     int x = SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_LEFTX);
     int y = SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_LEFTY);
+#else
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; ++b)
+      if (SDL_GameControllerGetButton(g_gamepad, (SDL_GameControllerButton)b))
+        input |= GamepadButtonBit(b);
+    int dz = settings->deadzone[0] * 32768 / 100;
+    int x = SDL_GameControllerGetAxis(g_gamepad, SDL_CONTROLLER_AXIS_LEFTX);
+    int y = SDL_GameControllerGetAxis(g_gamepad, SDL_CONTROLLER_AXIS_LEFTY);
+    /* Also check triggers for leaning (ZL / ZR) */
+    if (SDL_GameControllerGetAxis(g_gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8000)
+      input |= 0x400; /* L */
+    if (SDL_GameControllerGetAxis(g_gamepad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000)
+      input |= 0x800; /* R */
+#endif
     if (y < -dz) input |= 0x010;
     if (y > dz) input |= 0x020;
     if (x < -dz) input |= 0x040;
@@ -326,6 +419,29 @@ static bool VerifyRom(const char *path, const uint8 expected[32]) {
   return snesrecomp_rom_verify_sha256(path, expected) != 0;
 }
 
+#ifdef __SWITCH__
+static const char *FindSwitchRom(void) {
+  static const char *const candidates[] = {
+      "romfs:/fzero_usa_reference.sfc",
+      "romfs:/fzero.sfc",
+      "fzero_usa_reference.sfc",
+      "F-Zero (USA).sfc",
+      "fzero.sfc",
+      "sdmc:/switch/fzero/fzero_usa_reference.sfc",
+      "sdmc:/switch/fzero/F-Zero (USA).sfc",
+      "sdmc:/switch/fzero/fzero.sfc"
+  };
+  for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); ++i) {
+    FILE *f = fopen(candidates[i], "rb");
+    if (f) {
+      fclose(f);
+      return candidates[i];
+    }
+  }
+  return NULL;
+}
+#endif
+
 int main(int argc, char **argv) {
   static const uint8 expected_sha256[32] = {
       0xbf, 0x16, 0xc3, 0xc8, 0x67, 0xc5, 0x8e, 0x2a,
@@ -335,6 +451,34 @@ int main(int argc, char **argv) {
   };
   FZeroSettings settings;
   FZeroSettingsInitDefault(&settings);
+#ifdef __SWITCH__
+  romfsInit();
+  mkdir("sdmc:/switch", 0777);
+  mkdir("sdmc:/switch/fzero", 0777);
+  chdir("sdmc:/switch/fzero");
+  freopen("sdmc:/switch/fzero/fzero.log", "w", stderr);
+  setvbuf(stderr, NULL, _IOLBF, 0);
+  fprintf(stderr, "=== F-Zero Recomp (Nintendo Switch) Log ===\n");
+
+  u64 proc_core_mask = 0;
+  Result rc_info = svcGetInfo(&proc_core_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+  Handle cur_handle = threadGetCurHandle();
+  s32 cur_preferred = -1;
+  u64 cur_affinity = 0;
+  Result rc_get = svcGetThreadCoreMask(&cur_preferred, &cur_affinity, cur_handle);
+
+  int target_core = 0;
+  if (proc_core_mask != 0 && !(proc_core_mask & (1ULL << target_core))) {
+    for (int c = 0; c < 4; c++) {
+      if (proc_core_mask & (1ULL << c)) { target_core = c; break; }
+    }
+  }
+  u32 target_mask = (1U << target_core);
+  Result rc_set = svcSetThreadCoreMask(cur_handle, target_core, target_mask);
+  fprintf(stderr, "[Affinity] handle=0x%x, proc_mask=0x%lx (rc=0x%x), cur_preferred=%d, cur_affinity=0x%lx (rc=0x%x), target_core=%d, set_rc=0x%x\n",
+          (unsigned int)cur_handle, (unsigned long)proc_core_mask, (unsigned int)rc_info, (int)cur_preferred, (unsigned long)cur_affinity, (unsigned int)rc_get, target_core, (unsigned int)rc_set);
+  settings.player_src[0] = 2; /* Gamepad on Switch */
+#endif
 
   const char *positional_rom = NULL;
   for (int i = 1; i < argc; ++i) {
@@ -381,6 +525,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "ROM verification failed: %s\n", resolver_rom);
     return 1;
   }
+
+#ifdef __SWITCH__
+  const char *sw_rom = FindSwitchRom();
+  if (sw_rom) {
+    snprintf(rom_path, sizeof(rom_path), "%s", sw_rom);
+    rom_resolved = 1;
+  }
+#endif
 
 #if defined(RECOMP_LAUNCHER)
 #ifdef FZERO_MACOS_APP
@@ -516,6 +668,7 @@ int main(int argc, char **argv) {
       VerifyRom(resolver_arg, expected_sha256))
     resolver_rom = resolver_arg;
 #endif
+#if defined(RECOMP_LAUNCHER)
   if (!rom_resolved && headless && !resolver_rom) {
     if (!ReadCachedRomPath(rom_path, sizeof(rom_path))) {
       fprintf(stderr, "No ROM supplied or cached for the bounded run\n");
@@ -533,6 +686,12 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+#else
+  if (!rom_resolved) {
+    fprintf(stderr, "No matching F-Zero (USA) ROM found in romfs or sdmc\n");
+    return 1;
+  }
+#endif
 
   if (!VerifyRom(rom_path, expected_sha256)) {
     fprintf(stderr, "ROM verification failed: %s\n", rom_path);
@@ -554,23 +713,46 @@ int main(int argc, char **argv) {
   fprintf(stderr, "rom loaded: %s (%ld bytes)\n", rom_path, rom_size);
 
   /* SDL3's SDL_Init returns bool: true on success. */
+#if SNESRECOMP_SDL3
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
     fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
   }
+#else
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
+    fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+    return 1;
+  }
+#endif
 
   if (settings.player_src[0] == 2) OpenConnectedGamepad();
 
+#if SNESRECOMP_SDL3
   int win_scale = settings.window_scale < 1 ? 1 : settings.window_scale;
   g_window = SDL_CreateWindow("F-Zero (SNES recomp)",
                               FZeroDisplayWidth(settings.widescreen) * win_scale,
                               FZERO_FRAME_HEIGHT * win_scale,
                               SDL_WINDOW_RESIZABLE);
+#elif defined(__SWITCH__)
+  g_window = SDL_CreateWindow("F-Zero (SNES recomp)",
+                              SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                              1280, 720,
+                              SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN);
+#else
+  int win_scale = settings.window_scale < 1 ? 1 : settings.window_scale;
+  g_window = SDL_CreateWindow("F-Zero (SNES recomp)",
+                              SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                              FZeroDisplayWidth(settings.widescreen) * win_scale,
+                              FZERO_FRAME_HEIGHT * win_scale,
+                              SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+#endif
   if (!g_window) {
     fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
     return 1;
   }
+#ifndef __SWITCH__
   if (settings.fullscreen) snesrecomp_sdl_set_fullscreen(g_window, true);
+#endif
   const char *presentation_env = getenv("SNESRECOMP_PRESENTATION");
   bool legacy_video = presentation_env && !strcmp(presentation_env, "legacy");
   const char *validate_env = getenv("SNESRECOMP_VALIDATE_PRESENTATION");
@@ -585,19 +767,16 @@ int main(int argc, char **argv) {
     fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
     return 1;
   }
-  /* Sync presents to the display refresh. Without this the PPU frame is
-   * scanned out mid-refresh: the title screen tears and the fine per-scanline
-   * detail of the Mode-7 road shows up as horizontal-band "background
-   * glitching" rather than a single clean tear. The reference host enables it
-   * at renderer creation; we call SDL_CreateRenderer directly, so set it here.
-   * Best-effort: if vsync isn't supported we fall back to the manual pacing
-   * lower in the loop, which self-skips when present already consumed the
-   * frame time. */
+#if SNESRECOMP_SDL3
   SDL_SetRenderVSync(g_renderer, 1);
   SDL_SetRenderLogicalPresentation(
       g_renderer, FZeroDisplayWidth(settings.widescreen), FZERO_FRAME_HEIGHT,
       settings.ignore_aspect ? SDL_LOGICAL_PRESENTATION_STRETCH
                              : SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
+#else
+  SDL_RenderSetLogicalSize(g_renderer, FZeroDisplayWidth(settings.widescreen), FZERO_FRAME_HEIGHT);
+  SDL_RenderSetIntegerScale(g_renderer, settings.ignore_aspect ? SDL_FALSE : SDL_TRUE);
+#endif
   g_texture = FZeroPresentationTexture(g_presentation);
   if (!g_texture) {
     fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
@@ -648,7 +827,11 @@ int main(int argc, char **argv) {
 
   /* The callback renders through g_snes->apu, so do not let SDL invoke it
    * until SnesInit has established the emulated machine. */
+#if SNESRECOMP_SDL3
   if (g_audio_stream) SDL_ResumeAudioStreamDevice(g_audio_stream);
+#else
+  if (g_audio_device) SDL_PauseAudioDevice(g_audio_device, 0);
+#endif
 
   PpuBeginDrawing(g_ppu, g_pixels, (size_t)FZERO_FRAME_WIDTH * 4,
                   kPpuRenderFlags_NewRenderer);
@@ -694,21 +877,23 @@ int main(int argc, char **argv) {
   bool running = true;
   long host_frame_number = 0;
   uint32 last_tick = SDL_GetTicks();
-#if defined(RECOMP_LAUNCHER) && SNESRECOMP_SDL3
   bool prev_overlay_open = false;
-#endif
   uint32 blocked_input = 0;
   int previous_source = settings.player_src[0];
   unsigned long presentation_frames = 0;
   FZeroFrameRate frame_rate;
-  FZeroFrameRateInit(&frame_rate, SDL_GetTicksNS());
+  FZeroFrameRateInit(&frame_rate, fzero_get_ticks_ns());
   const char *present_env = getenv("SNESRECOMP_MAX_PRESENTATIONS");
   unsigned long max_presentations = present_env ? strtoul(present_env, NULL, 10) : 0;
   while (running) {
+#ifdef __SWITCH__
+    if (!appletMainLoop()) { running = false; break; }
+#endif
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       if (g_runtime_imgui && FZeroRuntimeUiIsOpen(g_runtime_ui))
         fzero_imgui_process_event(g_runtime_imgui, &event);
+#if SNESRECOMP_SDL3
       if (event.type == SDL_EVENT_QUIT) { running = false; continue; }
       if (event.type == SDL_EVENT_GAMEPAD_REMOVED && g_gamepad &&
           SDL_GetGamepadID(g_gamepad) == event.gdevice.which) {
@@ -725,6 +910,18 @@ int main(int argc, char **argv) {
            event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) &&
           (!g_gamepad || event.gbutton.which != SDL_GetGamepadID(g_gamepad)))
         continue;
+#else
+      if (event.type == SDL_QUIT) { running = false; continue; }
+      if (event.type == SDL_CONTROLLERDEVICEREMOVED && g_gamepad) {
+        SDL_GameControllerClose(g_gamepad);
+        g_gamepad = NULL;
+        FZeroRuntimeUiResetPad(g_runtime_ui);
+      }
+      if (event.type == SDL_CONTROLLERDEVICEADDED && settings.player_src[0] == 2)
+        OpenConnectedGamepad();
+      if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+        FZeroRuntimeUiResetPad(g_runtime_ui);
+#endif
       int was_open = FZeroRuntimeUiIsOpen(g_runtime_ui);
       int consumed = FZeroRuntimeUiHandleEvent(g_runtime_ui, &event);
       if (was_open != FZeroRuntimeUiIsOpen(g_runtime_ui))
@@ -734,14 +931,23 @@ int main(int argc, char **argv) {
          * Menu transitions above still require release before resuming. */
         continue;
       }
+#if SNESRECOMP_SDL3
       if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
           event.key.scancode == SDL_SCANCODE_ESCAPE) running = false;
+#else
+      if (event.type == SDL_KEYDOWN && !event.key.repeat &&
+          event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = false;
+#endif
     }
     if (!running) break;
 
     bool overlay_open = FZeroRuntimeUiIsOpen(g_runtime_ui);
     if (settings.player_src[0] != previous_source) {
+#if SNESRECOMP_SDL3
       if (g_gamepad) { SDL_CloseGamepad(g_gamepad); g_gamepad = NULL; }
+#else
+      if (g_gamepad) { SDL_GameControllerClose(g_gamepad); g_gamepad = NULL; }
+#endif
       if (settings.player_src[0] == 2) OpenConnectedGamepad();
       FZeroRuntimeUiResetPad(g_runtime_ui);
       previous_source = settings.player_src[0];
@@ -751,6 +957,8 @@ int main(int argc, char **argv) {
     if (prev_overlay_open != overlay_open) blocked_input |= input;
     blocked_input &= input;
     prev_overlay_open = overlay_open;
+    uint64 t0 = SDL_GetPerformanceCounter();
+    uint64 t_run = t0, t_ppu = t0, t_upload = t0;
     if (!overlay_open) {
       ++host_frame_number;
       bool focused = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
@@ -761,14 +969,34 @@ int main(int argc, char **argv) {
       FZeroRecordsAfterFrame(&g_records, g_ram, g_sram);
       if (g_records.dirty) SaveRecords();
       if (max_frames > 0 && host_frame_number >= max_frames) running = false;
+      t_run = SDL_GetPerformanceCounter();
+
       g_rtl_game_info->draw_ppu_frame();
-      if (!FZeroPresentationUpload(g_presentation,
-                                   g_layers ? (void *)g_layers->world : g_pixels,
-                                   g_layers ? g_layers->hud : NULL))
-        Die(SDL_GetError());
-      if (g_layers && !FZeroPresentationUploadWide(g_presentation, g_layers->wide_world, g_layers->wide_hud))
-        Die(SDL_GetError());
+      t_ppu = SDL_GetPerformanceCounter();
+
+      if (settings.widescreen) {
+        if (g_layers && !FZeroPresentationUploadWide(g_presentation, g_layers->wide_world, g_layers->wide_hud))
+          Die(SDL_GetError());
+      } else {
+        if (!FZeroPresentationUpload(g_presentation,
+                                     g_layers ? (void *)g_layers->world : g_pixels,
+                                     g_layers ? g_layers->hud : NULL))
+          Die(SDL_GetError());
+      }
+      t_upload = SDL_GetPerformanceCounter();
     }
+
+#ifdef __SWITCH__
+    static uint64 s_perf_freq = 0;
+    if (!s_perf_freq) s_perf_freq = SDL_GetPerformanceFrequency();
+    uint64 t_pre_sleep = SDL_GetPerformanceCounter();
+    int64_t elapsed_ns = (int64_t)((t_pre_sleep - t0) * 1000000000ULL / s_perf_freq);
+    int64_t remaining_ns = 16666666LL - elapsed_ns;
+    if (remaining_ns > 3000000LL) {
+      svcSleepThread(remaining_ns - 2500000LL);
+    }
+    uint64 t_post_sleep = SDL_GetPerformanceCounter();
+#endif
 
     FZeroPresentationSetWidescreen(g_presentation, settings.widescreen != 0);
     SDL_RenderClear(g_renderer);
@@ -776,6 +1004,7 @@ int main(int argc, char **argv) {
                               (FZeroVisualStyle)settings.visual_style;
     FZeroPresentationSetStyle(g_presentation, style);
     if (!FZeroPresentationDraw(g_presentation)) Die(SDL_GetError());
+    uint64 t_draw = SDL_GetPerformanceCounter();
     if (validate_video) {
       bool hud_only = style != FZERO_VISUAL_ORIGINAL &&
                       FZeroPresentationHasShader(g_presentation);
@@ -810,13 +1039,62 @@ int main(int argc, char **argv) {
       fzero_imgui_render_overlay(g_runtime_imgui, g_runtime_ui, g_renderer,
                                 settings.show_fps, frame_rate.fps);
 #endif
-    if (SDL_RenderPresent(g_renderer))
-      FZeroFrameRatePresent(&frame_rate, SDL_GetTicksNS());
+    SDL_RenderPresent(g_renderer);
+    uint64 t_present = SDL_GetPerformanceCounter();
+    FZeroFrameRatePresent(&frame_rate, fzero_get_ticks_ns());
+
+    static uint64 s_accum_run, s_accum_ppu, s_accum_upload, s_accum_draw, s_accum_present, s_accum_total;
+#ifdef __SWITCH__
+    static uint64 s_accum_sleep;
+    s_accum_sleep += (t_post_sleep - t_pre_sleep);
+#endif
+    static int s_perf_frames = 0;
+    static uint64 s_last_perf_time = 0;
+#ifndef __SWITCH__
+    static uint64 s_perf_freq = 0;
+    if (!s_perf_freq) s_perf_freq = SDL_GetPerformanceFrequency();
+#endif
+    s_accum_run += (t_run - t0);
+    s_accum_ppu += (t_ppu - t_run);
+    s_accum_upload += (t_upload - t_ppu);
+#ifdef __SWITCH__
+    s_accum_draw += (t_draw - t_post_sleep);
+#else
+    s_accum_draw += (t_draw - t_upload);
+#endif
+    s_accum_present += (t_present - t_draw);
+    s_accum_total += (t_present - t0);
+    s_perf_frames++;
+    if (s_perf_frames >= 60) {
+      double f = (double)s_perf_freq / 1000.0;
+      double run_ms = (double)s_accum_run / (s_perf_frames * f);
+      double ppu_ms = (double)s_accum_ppu / (s_perf_frames * f);
+      double upload_ms = (double)s_accum_upload / (s_perf_frames * f);
+      double draw_ms = (double)s_accum_draw / (s_perf_frames * f);
+      double present_ms = (double)s_accum_present / (s_perf_frames * f);
+      double total_ms = (double)s_accum_total / (s_perf_frames * f);
+      uint64 now = SDL_GetPerformanceCounter();
+      double wall_fps = s_last_perf_time > 0 ? (s_perf_frames * (double)s_perf_freq / (now - s_last_perf_time)) : 60.0;
+      s_last_perf_time = now;
+#ifdef __SWITCH__
+      double sleep_ms = (double)s_accum_sleep / (s_perf_frames * f);
+      int cur_cpu = svcGetCurrentProcessorNumber();
+      fprintf(stderr, "[Perf] Core: %d | FPS: %5.1f | Game: %4.2fms | PPU: %4.2fms | Upload: %4.2fms | Sleep: %4.2fms | Draw: %4.2fms | Present: %4.2fms | Frame: %4.2fms\n",
+              cur_cpu, wall_fps, run_ms, ppu_ms, upload_ms, sleep_ms, draw_ms, present_ms, total_ms);
+      s_accum_sleep = 0;
+#else
+      fprintf(stderr, "[Perf] FPS: %5.1f | Game: %4.2fms | PPU: %4.2fms | Upload: %4.2fms | Draw: %4.2fms | Present: %4.2fms | Frame: %4.2fms\n",
+              wall_fps, run_ms, ppu_ms, upload_ms, draw_ms, present_ms, total_ms);
+#endif
+      s_accum_run = s_accum_ppu = s_accum_upload = s_accum_draw = s_accum_present = s_accum_total = 0;
+      s_perf_frames = 0;
+    }
 
     if (max_presentations && ++presentation_frames >= max_presentations)
       running = false;
 
-    /* ~60 fps pacing (17/17/16 ms) so audio stays in sync. */
+#ifndef __SWITCH__
+    /* ~60 fps pacing (17/17/16 ms) so audio stays in sync on desktop VRR / high-refresh displays. */
     {
       static const uint8 delays[3] = {17, 17, 16};
       static unsigned delay_index;
@@ -833,18 +1111,27 @@ int main(int argc, char **argv) {
         last_tick = cur;
       }
     }
+#endif
   }
 
   SaveRecords();
   FZeroSetRecords(NULL);
   Tier2CoverageWriteDefaultManifest("fzero");
 
+#if SNESRECOMP_SDL3
   if (g_gamepad) SDL_CloseGamepad(g_gamepad);
+#else
+  if (g_gamepad) SDL_GameControllerClose(g_gamepad);
+#endif
 #if defined(RECOMP_LAUNCHER) && SNESRECOMP_SDL3
   if (g_runtime_ui) FZeroRuntimeUiDestroy(g_runtime_ui);
   if (g_runtime_imgui) fzero_imgui_destroy(g_runtime_imgui);
 #endif
+#if SNESRECOMP_SDL3
   if (g_audio_stream) SDL_DestroyAudioStream(g_audio_stream);
+#else
+  if (g_audio_device) SDL_CloseAudioDevice(g_audio_device);
+#endif
   if (g_audio_mutex) SDL_DestroyMutex(g_audio_mutex);
   free(g_audiobuffer);
   free(g_audio_stream_buffer);
@@ -869,5 +1156,8 @@ int main(int argc, char **argv) {
   SDL_DestroyWindow(g_window);
   SDL_Quit();
   free(rom);
+#ifdef __SWITCH__
+  romfsExit();
+#endif
   return video_result;
 }

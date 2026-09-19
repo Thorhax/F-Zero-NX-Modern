@@ -25,6 +25,7 @@ __pycache__/
 /project.txt
 /*.sfc
 /*.smc
+/romfs/
 /*.fig
 /*.srm
 /*.srm.bak

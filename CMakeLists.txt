@@ -4,18 +4,25 @@ project(fzero_recomp C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+if(NINTENDO_SWITCH)
+    set(SNESRECOMP_SDL_BACKEND "SDL2" CACHE STRING "Desktop SDL backend (SDL3 or SDL2)" FORCE)
+endif()
+
 set(SNESRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/snesrecomp" CACHE PATH
     "Path to the snesrecomp checkout used by this game")
 include(${SNESRECOMP_ROOT}/runner/runner.cmake)
 
-if(NOT SNESRECOMP_SDL_BACKEND STREQUAL "SDL3")
+if(NOT NINTENDO_SWITCH AND NOT SNESRECOMP_SDL_BACKEND STREQUAL "SDL3")
     message(FATAL_ERROR "The F-Zero desktop host requires SDL3")
 endif()
-set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH
-    "Path to the pinned recomp-ui checkout")
-include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
-include(cmake/fzero_shaders.cmake)
-include(cmake/fzero_launcher.cmake)
+
+if(NOT NINTENDO_SWITCH)
+    set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH
+        "Path to the pinned recomp-ui checkout")
+    include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+    include(cmake/fzero_shaders.cmake)
+    include(cmake/fzero_launcher.cmake)
+endif()
 
 file(GLOB GENERATED_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/generated/*.c")
@@ -24,7 +31,7 @@ if(NOT GENERATED_SOURCES)
     message(FATAL_ERROR "No generated C found. Run tools/regenerate.ps1 with your F-Zero (USA) ROM, or follow the README generation steps.")
 endif()
 
-add_executable(fzero_recomp
+set(FZERO_SOURCES
     ${SNESRECOMP_RUNNER_SOURCES}
     ${GENERATED_SOURCES}
     src/fzero_records.c
@@ -40,35 +47,67 @@ add_executable(fzero_recomp
     src/fzero_vehicles.c
     src/fzero_ground.c
     src/config.c
-    src/runtime_ui.c
-    src/runtime_ui_imgui.cpp
-    src/imgui_impl_sdlrenderer3.cpp
 )
+
+if(NINTENDO_SWITCH)
+    list(APPEND FZERO_SOURCES src/switch_stubs.c)
+else()
+    list(APPEND FZERO_SOURCES
+        src/runtime_ui.c
+        src/runtime_ui_imgui.cpp
+        src/imgui_impl_sdlrenderer3.cpp
+    )
+endif()
+
+add_executable(fzero_recomp ${FZERO_SOURCES})
+
 # The runner's debug hooks (debug_on_* / RDB_BLOCK_HOOK) are only compiled
 # when SNESRECOMP_REVERSE_DEBUG is on; SMW's build forces it off for a
 # normal release, as does this one.
-target_compile_definitions(fzero_recomp PRIVATE SNESRECOMP_REVERSE_DEBUG=0
-    RECOMP_UI_HOST_STB_WRITE=1)
+target_compile_definitions(fzero_recomp PRIVATE SNESRECOMP_REVERSE_DEBUG=0)
+if(NOT NINTENDO_SWITCH)
+    target_compile_definitions(fzero_recomp PRIVATE RECOMP_UI_HOST_STB_WRITE=1)
+endif()
+
 target_include_directories(fzero_recomp PRIVATE
     ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
     ${SNESRECOMP_RUNNER_ROOT}/src/desktop
     ${CMAKE_CURRENT_SOURCE_DIR}/config
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui/src
 )
 snesrecomp_target_sdl(fzero_recomp)
-fzero_target_shaders(fzero_recomp)
-recomp_target_launcher_ui(fzero_recomp
-    CONSOLE snes
-    BOXART "${CMAKE_CURRENT_SOURCE_DIR}/assets/launcher/boxart.png"
-    BOXART_NAME boxart.png)
-fzero_target_launcher(fzero_recomp)
-set_property(TARGET fzero_recomp APPEND PROPERTY LINK_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/assets/launcher/boxart.png")
+
+if(NOT NINTENDO_SWITCH)
+    fzero_target_shaders(fzero_recomp)
+    recomp_target_launcher_ui(fzero_recomp
+        CONSOLE snes
+        BOXART "${CMAKE_CURRENT_SOURCE_DIR}/assets/launcher/boxart.png"
+        BOXART_NAME boxart.png)
+    fzero_target_launcher(fzero_recomp)
+    set_property(TARGET fzero_recomp APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/launcher/boxart.png")
+endif()
+
 if(NOT MSVC)
     target_compile_options(fzero_recomp PRIVATE
         -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
 endif()
 target_link_libraries(fzero_recomp PRIVATE ${SNESRECOMP_RUNNER_LIBRARIES})
+
+if(NINTENDO_SWITCH)
+    target_link_libraries(fzero_recomp PRIVATE -lnx -lm)
+    nx_generate_nacp(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/fzero_recomp.nacp"
+        NAME "F-Zero"
+        AUTHOR "Thorhax"
+        VERSION "0.3.0"
+    )
+    nx_create_nro(fzero_recomp
+        NACP "${CMAKE_CURRENT_BINARY_DIR}/fzero_recomp.nacp"
+        ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/switch_icon.jpg"
+        ROMFS "${CMAKE_CURRENT_SOURCE_DIR}/romfs"
+    )
+endif()
 
 option(FZERO_MACOS_APP "Use per-user storage for the packaged Mac app" OFF)
 if(FZERO_MACOS_APP)
@@ -79,7 +118,7 @@ if(FZERO_MACOS_APP)
 endif()
 
 include(CTest)
-if(BUILD_TESTING)
+if(BUILD_TESTING AND NOT NINTENDO_SWITCH)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(fzero_records_tests tests/test_records.c src/fzero_records.c)
     target_include_directories(fzero_records_tests PRIVATE src)

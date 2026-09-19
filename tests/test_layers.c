@@ -276,6 +276,20 @@ static void CheckMovedHud(void) {
     CheckAt(true,104);
     CHECK(!layers.wide_hud[103][24]);
     CHECK(layers.wide_hud[103][24+FZERO_WIDE_MARGIN]==0xff00ff00);
+    /* Test all scanlines and distinct rows of a HUD sprite to ensure
+     * sprite evaluation matches ppu_evaluateSprites row-for-row. */
+    for(int row=0;row<8;++row) ppu.vram[row]=1<<row;
+    SetSprite(24,24,100,false,0x3000);
+    layers.move_hud=true;
+    for(int line=101;line<=108;++line) {
+        CheckAt(true,line);
+        int y=line-1;
+        int row=y-100;
+        int px=7-row;
+        CHECK(layers.wide_hud[y][24+px]==0xff00ff00u);
+        CHECK(!layers.wide_hud[y][24+px+FZERO_WIDE_MARGIN]);
+    }
+    for(int row=0;row<8;++row) ppu.vram[row]=0xff;
     /* Invented BG3 lettering spanning the overlapping source/destination
      * ranges. All sources must be cleared before any destination is written. */
     for(int slot=0;slot<128;++slot) SetSprite(slot,256,240,false,0);
