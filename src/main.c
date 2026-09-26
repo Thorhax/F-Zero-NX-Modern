@@ -410,6 +410,13 @@ static int DefaultRomExists(void) {
 
 /* ── main ──────────────────────────────────────────────────────────────── */
 
+static const uint8 expected_sha256[32] = {
+    0xbf, 0x16, 0xc3, 0xc8, 0x67, 0xc5, 0x8e, 0x2a,
+    0xb0, 0x61, 0xc7, 0x0d, 0xe9, 0x29, 0x5b, 0x69,
+    0x30, 0xd6, 0x3f, 0x29, 0xf8, 0x1c, 0xc9, 0x86,
+    0xf5, 0xec, 0xae, 0x03, 0xe0, 0xad, 0x18, 0xd2,
+};
+
 static bool VerifyRom(const char *path, const uint8 expected[32]) {
   const char *driver = getenv("SDL_VIDEODRIVER");
   /* The shared verifier opens a native Windows message box. Automated runs
@@ -422,37 +429,84 @@ static bool VerifyRom(const char *path, const uint8 expected[32]) {
 #ifdef __SWITCH__
 static const char *FindSwitchRom(void) {
   static const char *const candidates[] = {
-      "romfs:/fzero_usa_reference.sfc",
-      "romfs:/fzero.sfc",
-      "fzero_usa_reference.sfc",
-      "F-Zero (USA).sfc",
       "fzero.sfc",
-      "sdmc:/switch/fzero/fzero_usa_reference.sfc",
+      "fzero.smc",
+      "F-Zero (USA).sfc",
+      "F-Zero (USA).smc",
+      "F-Zero.sfc",
+      "F-Zero.smc",
+      "fzero_usa.sfc",
+      "fzero_usa.smc",
+      "fzero_usa_reference.sfc",
+      "sdmc:/switch/fzero/fzero.sfc",
+      "sdmc:/switch/fzero/fzero.smc",
       "sdmc:/switch/fzero/F-Zero (USA).sfc",
-      "sdmc:/switch/fzero/fzero.sfc"
+      "sdmc:/switch/fzero/F-Zero (USA).smc",
+      "sdmc:/switch/fzero/F-Zero.sfc",
+      "sdmc:/switch/fzero/F-Zero.smc",
+      "sdmc:/switch/fzero/fzero_usa.sfc",
+      "sdmc:/switch/fzero/fzero_usa.smc",
+      "sdmc:/switch/fzero/fzero_usa_reference.sfc",
+      "romfs:/fzero.sfc",
+      "romfs:/fzero_usa_reference.sfc"
   };
+  /* Pass 1: find a candidate that verifies against expected sha256 */
   for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); ++i) {
-    FILE *f = fopen(candidates[i], "rb");
-    if (f) {
-      fclose(f);
+    if (snesrecomp_rom_is_readable(candidates[i]) &&
+        snesrecomp_rom_match_sha256(candidates[i], (const uint8 (*)[32])expected_sha256, 1) == 0) {
+      return candidates[i];
+    }
+  }
+  /* Pass 2: return any existing candidate file so VerifyRom can report hash mismatch */
+  for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); ++i) {
+    if (snesrecomp_rom_is_readable(candidates[i])) {
       return candidates[i];
     }
   }
   return NULL;
 }
+
+static void ShowSwitchErrorScreen(const char *header, const char *detail, const char *found_path) {
+  consoleInit(NULL);
+  PadState pad;
+  padInitializeDefault(&pad);
+
+  printf("\x1b[2;1H");
+  printf("  ============================================================\n");
+  printf("                  F-Zero (SNES Recompilation)\n");
+  printf("  ============================================================\n\n");
+  printf("   [ERROR] %s\n\n", header);
+  if (detail) {
+    printf("   %s\n\n", detail);
+  }
+  if (found_path) {
+    printf("   File checked: %s\n\n", found_path);
+  }
+  printf("   Expected ROM: F-Zero (USA) [SNES]\n");
+  printf("   Please place 'fzero.sfc' or 'F-Zero (USA).sfc' in:\n");
+  printf("     sdmc:/switch/fzero/fzero.sfc\n\n");
+  printf("   Expected SHA-256:\n");
+  printf("     bf16c3c867c58e2ab061c70de9295b6930d63f29f81cc986f5ecae03e0ad18d2\n\n");
+  printf("   Press (+) or (A) on your controller to exit to hbmenu.\n");
+  printf("  ============================================================\n");
+
+  while (appletMainLoop()) {
+    padUpdate(&pad);
+    u64 kDown = padGetButtonsDown(&pad);
+    if (kDown & (HidNpadButton_A | HidNpadButton_Plus | HidNpadButton_B | HidNpadButton_X))
+      break;
+    consoleUpdate(NULL);
+  }
+  consoleExit(NULL);
+}
 #endif
 
 int main(int argc, char **argv) {
-  static const uint8 expected_sha256[32] = {
-      0xbf, 0x16, 0xc3, 0xc8, 0x67, 0xc5, 0x8e, 0x2a,
-      0xb0, 0x61, 0xc7, 0x0d, 0xe9, 0x29, 0x5b, 0x69,
-      0x30, 0xd6, 0x3f, 0x29, 0xf8, 0x1c, 0xc9, 0x86,
-      0xf5, 0xec, 0xae, 0x03, 0xe0, 0xad, 0x18, 0xd2,
-  };
   FZeroSettings settings;
   FZeroSettingsInitDefault(&settings);
 #ifdef __SWITCH__
-  romfsInit();
+  Result rc_romfs = romfsInit();
+  (void)rc_romfs;
   mkdir("sdmc:/switch", 0777);
   mkdir("sdmc:/switch/fzero", 0777);
   chdir("sdmc:/switch/fzero");
@@ -688,13 +742,23 @@ int main(int argc, char **argv) {
   }
 #else
   if (!rom_resolved) {
-    fprintf(stderr, "No matching F-Zero (USA) ROM found in romfs or sdmc\n");
+    fprintf(stderr, "No matching F-Zero (USA) ROM found in sdmc:/switch/fzero/\n");
+#ifdef __SWITCH__
+    ShowSwitchErrorScreen("No F-Zero (USA) ROM found!",
+                          "Could not locate an F-Zero (USA) ROM on your SD card.",
+                          NULL);
+#endif
     return 1;
   }
 #endif
 
   if (!VerifyRom(rom_path, expected_sha256)) {
     fprintf(stderr, "ROM verification failed: %s\n", rom_path);
+#ifdef __SWITCH__
+    ShowSwitchErrorScreen("ROM Verification Failed!",
+                          "The ROM file found does not match the expected F-Zero (USA) SHA-256.",
+                          rom_path);
+#endif
     return 1;
   }
 #ifdef FZERO_MACOS_APP
@@ -708,6 +772,11 @@ int main(int argc, char **argv) {
   uint8_t *rom = ReadWholeFile(rom_path, &rom_size);
   if (!rom) {
     fprintf(stderr, "Unable to load ROM: %s\n", rom_path);
+#ifdef __SWITCH__
+    ShowSwitchErrorScreen("Unable to Read ROM File!",
+                          "The file could not be read into memory.",
+                          rom_path);
+#endif
     return 1;
   }
   fprintf(stderr, "rom loaded: %s (%ld bytes)\n", rom_path, rom_size);
@@ -1157,7 +1226,9 @@ int main(int argc, char **argv) {
   SDL_Quit();
   free(rom);
 #ifdef __SWITCH__
-  romfsExit();
+  if (R_SUCCEEDED(rc_romfs)) {
+    romfsExit();
+  }
 #endif
   return video_result;
 }

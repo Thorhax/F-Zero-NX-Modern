@@ -105,7 +105,6 @@ if(NINTENDO_SWITCH)
     nx_create_nro(fzero_recomp
         NACP "${CMAKE_CURRENT_BINARY_DIR}/fzero_recomp.nacp"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/switch_icon.jpg"
-        ROMFS "${CMAKE_CURRENT_SOURCE_DIR}/romfs"
     )
 endif()
 

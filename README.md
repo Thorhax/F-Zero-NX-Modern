@@ -20,8 +20,8 @@ This is a native Nintendo Switch port of **FZeroRecomp**, the static C recompila
 
 - **60 FPS Gameplay**: Smooth 60 FPS performance with recommended CPU overclock.
 - **Widescreen Mode 7**: Native 1280×720 widescreen presentation with expanded track rendering and multi-vehicle display.
-- **Embedded RomFS**: The reference ROM is bundled directly inside the `.nro` binary—no external files required to play out-of-the-box.
-- **External ROM Support**: Optionally loads custom/reference ROMs placed at `sdmc:/switch/fzero/fzero.sfc`.
+- **BYO ROM (Bring Your Own ROM)**: The `.nro` is completely standalone and legally distributable with no copyrighted game assets embedded. Place your own SNES *F-Zero (USA)* ROM (`fzero.sfc`, `fzero.smc`, or `F-Zero (USA).sfc`) in `sdmc:/switch/fzero/`.
+- **On-Screen Guidance**: If the ROM is missing or invalid, a helpful error screen is displayed directly on the Switch console explaining the required filename, path, and SHA-256 checksum.
 - **SRAM Save Support**: High scores, lap times, and game progress are saved to `sdmc:/switch/fzero/fzero.srm`.
 - **Modern Controller Ergonomics**:
   - Full Nintendo Switch Joy-Con and Pro Controller support.
@@ -48,5 +48,6 @@ This is a native Nintendo Switch port of **FZeroRecomp**, the static C recompila
 ## Installation
 
 1. Copy the `switch/` directory to the root of your Switch's microSD card (so that `fzero_recomp.nro` is located at `sdmc:/switch/fzero/fzero_recomp.nro`).
-2. Launch the **Homebrew Menu** on your Nintendo Switch.
-3. Select **F-Zero** and enjoy!
+2. Place your own *F-Zero (USA)* SNES ROM (`.sfc` or `.smc`) in `sdmc:/switch/fzero/fzero.sfc` (or `F-Zero (USA).sfc`).
+3. Launch the **Homebrew Menu** on your Nintendo Switch.
+4. Select **F-Zero** and enjoy!
